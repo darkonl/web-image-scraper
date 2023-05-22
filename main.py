@@ -22,7 +22,7 @@ logging.basicConfig(
     filename='app.log',
     filemode='w',
     format='%(name)s - %(levelname)s - %(message)s',
-    level=logging.DEBUG)
+    level=logging.WARNING)
 
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -132,35 +132,6 @@ def download_image(download_path: str, url: str, file_name: str):
         print('FAILED - ', e)
 
 
-def save_urls():
-    csv_path = os.path.join(ROOT_DIR, "cerca.csv")
-    with open(csv_path, encoding='cp850') as f:
-        reader = csv.reader(f)
-        data = list(reader)
-    data = flatten(data)
-    urls_list = list(filter(lambda x: "http" in x, data))
-    urls_list = [re.search("(?P<url>https?://\\S+)", x).group("url") for x in urls_list]
-
-    with open(f'urls/arxiusenlinia_urls.pkl', 'wb') as f:
-        pickle.dump({"urls": urls_list}, f)
-
-
-def scrap_images_from_csv(url: str = None):
-    with open('urls/arxiusenlinia_urls.pkl', 'rb') as f:
-        url_dict = pickle.load(f)
-
-    files_path = os.path.join(ROOT_DIR, "urls")
-    files_indices = [int(re.search(r'(\d+)', str(f.name)).group(1)) for f in os.scandir(files_path) if f.is_file() and any(char.isdigit() for char in f.name)]
-    for i in range(max(files_indices), len(url_dict["urls"])):
-        print(f"""INFO - Reading file {i}/{len(url_dict["urls"])}""")
-        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
-        img_urls = get_images_from_url(wd=driver, url=url_dict["urls"][i], delay=1)
-        img_urls_dict = {url: img_urls}
-        with open(f'urls/url-{i}.pkl', 'wb') as f:
-            pickle.dump(img_urls_dict, f)
-        driver.quit()
-
-
 def download_imgs():
     files_dir = os.path.join(ROOT_DIR, "urls")
     files_path = [f for f in os.scandir(files_dir) if f.is_file() and any(char.isdigit() for char in f.name)]
@@ -182,17 +153,36 @@ def get_last_file_read() -> dict:
     dict_files = [os.path.basename(f).split('.')[0] for f in os.listdir(HISTORY_PATH) if f.endswith(".pkl")]
     dict_files = [re.sub(r"dict-(.*)", r"\1", line) for line in dict_files]
     dict_files = [datetime.datetime.strptime(date_string, DATE_TIME_FORMAT) for date_string in dict_files]
+    if len(dict_files) == 0:
+        return dict()
     dict_files.sort()
     last_date = dict_files[-1]
     dict_files = [f for f in os.listdir(HISTORY_PATH) if last_date.strftime(DATE_TIME_FORMAT) in f]
     if len(dict_files) != 1:
-        raise Exception(f"It should be only 1 file with date_time = {last_date}")
+        raise Exception(f"There should be only 1 file with date_time = {last_date}")
 
     with open(os.path.join(HISTORY_PATH, dict_files[0]), 'rb') as f:
         last_dict = pickle.load(f)
-    for key in last_dict:
-        print(f"{key}: {last_dict[key]}")
-    print(last_dict)
+
+    assert last_dict
+
+    return last_dict
+
+
+def run_url(line: str, url_img_count_dict: dict) -> bool:
+    for key in url_img_count_dict:
+        if key in line:
+            text_file_read = [f for f in os.listdir(URLS_PATH) if f.endswith(".txt") and key in f]
+            if len(text_file_read) == 0:
+                return True
+            if len(text_file_read) > 1:
+                raise Exception(f"There should be at least one file containing {key}")
+            with open(text_file_read[0], 'r') as fp:
+                for count, line in enumerate(fp):
+                    pass
+            if count + 1 is url_img_count_dict[key]:
+                return False
+    return True
 
 
 def scrap_images_from_txt(filename: str = None, continue_last_job: bool = False):
@@ -201,10 +191,10 @@ def scrap_images_from_txt(filename: str = None, continue_last_job: bool = False)
     logging.debug(f"Reading file {filename}...")
     try:
         # first: create needed folders
-        if not URLS_PATH:
+        if not os.path.exists(URLS_PATH):
             # create urls folder if does not exist to store urls files with images' urls
             os.makedirs(URLS_PATH)
-        if not HISTORY_PATH:
+        if not os.path.exists(HISTORY_PATH):
             # create 'history' folder if does not exist to store last tries fetching images' urls
             os.makedirs(HISTORY_PATH)
 
@@ -212,16 +202,23 @@ def scrap_images_from_txt(filename: str = None, continue_last_job: bool = False)
         with open(filename, encoding="utf-8") as file:
             # urls in filename to list
             lines = file.read().splitlines()
+
         # create dictionary for history tracking
         url_img_count_dict = {}
-        if LOAD_LAST_JOB:
+        if continue_last_job:
             url_img_count_dict = get_last_file_read()
+
         # initialize driver
-        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
+        options = webdriver.ChromeOptions()
+        options.add_argument("--headless")
+        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
         for line in lines:
+            if continue_last_job and not run_url(line, url_img_count_dict):
+                continue
+
             code = re.sub(r".*\/(.*)", r"\1", line)
             logging.debug(f"Step: {code} ({lines.index(line) + 1}/({len(lines)}))")
-            images = ["url1", "url2"]  # get_images_from_url(wd=driver, url=line, )
+            images = get_images_from_url(wd=driver, url=line, )
             url_img_count_dict[code] = len(images)
 
             output_file = os.path.join(ROOT_DIR, "urls", f"{code}.txt")
@@ -229,8 +226,9 @@ def scrap_images_from_txt(filename: str = None, continue_last_job: bool = False)
                 f.write('\n'.join(images))
         driver.quit()
         # save dictionary for traceability
-        with open(os.path.join(HISTORY_PATH, f"dict-{time.strftime(DATE_TIME_FORMAT)}.pkl"), 'w+') as f:
-            pickle.dump(url_img_count_dict, f)
+        if len(url_img_count_dict) != 0:
+            with open(os.path.join(HISTORY_PATH, f"dict-{time.strftime(DATE_TIME_FORMAT)}.pkl"), 'wb+') as f:
+                pickle.dump(url_img_count_dict, f)
 
     except Exception as e:
         logging.error(f"Failed to read file {filename}...")
@@ -239,7 +237,6 @@ def scrap_images_from_txt(filename: str = None, continue_last_job: bool = False)
 
     logging.debug(f"Successfully read {filename}!")
     logging.debug(f"Txt files saved in the /urls folder for each result (total={len(lines)} files)")
-
 
 
 class App(tk.Tk):
@@ -264,7 +261,11 @@ class App(tk.Tk):
         self.load_last_file = load_last_file
         self.title("Web image scraper")
         self.geometry("300x300")
-        self.chk_last_job = tk.Checkbutton(self, text='Continue last job', onvalue=True, offvalue=False, command=self.set_run_last_job)
+        self.chk_last_job = tk.Checkbutton(self,
+                                           text='Continue last job',
+                                           onvalue=True,
+                                           offvalue=False,
+                                           command=self.set_run_last_job)
         self.chk_last_job.place(x=50, y=20)
         self.chk_last_job.pack()
 
