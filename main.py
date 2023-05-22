@@ -1,5 +1,4 @@
 import os
-from os import listdir
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
@@ -11,14 +10,32 @@ import requests
 import io
 from PIL import Image
 import time
+import datetime
 import csv
 import re
 import pickle
+import tkinter as tk
+from tkinter import filedialog as fd
+import logging
+
+logging.basicConfig(
+    filename='app.log',
+    filemode='w',
+    format='%(name)s - %(levelname)s - %(message)s',
+    level=logging.DEBUG)
 
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 DOWNLOAD_PATH = os.path.join(ROOT_DIR, "imgs")
+HISTORY_PATH = os.path.join(ROOT_DIR, "history")
+URLS_PATH = os.path.join(ROOT_DIR, "urls")
+DATE_TIME_FORMAT = '%Y%m%d-%H%M%S'
+LOAD_LAST_JOB = False
+URL_FILE_NAME = None
 
+
+window = tk.Tk()
+window.title('Web image scraper')
 
 def flatten(x):
     result = []
@@ -30,12 +47,13 @@ def flatten(x):
     return result
 
 
-def get_images_from_url(wd: webdriver, url: str, delay: int = 1):
-    def scroll_down(wd: webdriver):
+def get_images_from_url(wd: webdriver, url: str, delay: int = 1) -> set():
+    """It retrieves all image urls inside the url sent"""
+    def scroll_down(wd: wd):
         wd.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(delay)
 
-    print(f"INFO - Loading {url}")
+    logging.debug(f"Loading {url}...")
 
     wd.get(url)
 
@@ -47,16 +65,22 @@ def get_images_from_url(wd: webdriver, url: str, delay: int = 1):
                 (By.CSS_SELECTOR, 'div.ngx-gallery-image.ngx-gallery-active.ngx-gallery-clickable.ng-star-inserted')
             )
         )
-        print("Page is ready!")
+        logging.debug("Page is ready!")
     except TimeoutException:
-        print(f"Loading {url} took too much time!")
+        logging.error(f"Loading {url} took too much time!")
         return image_urls
+    except Exception as e:
+        logging.error(f"Something went wrong with {url}")
+        logging.error(f"Message: {str(e)}")
+        return image_urls
+
 
     try:
         first_image = wd.find_element(By.CSS_SELECTOR, "div.ngx-gallery-image.ngx-gallery-active.ngx-gallery-clickable.ng-star-inserted")
         first_image.click()
     except Exception as e:
-        print(f"FAILED - Loading {url} - {e}")
+        logging.error(f"Something went wrong with {url}")
+        logging.error(f"Message: {str(e)}")
         return image_urls
 
     max_images = 1
@@ -78,7 +102,7 @@ def get_images_from_url(wd: webdriver, url: str, delay: int = 1):
             img_src = wd.find_element(By.CLASS_NAME, "ngx-gallery-preview-img")
             if img_src.get_attribute('src') and 'http' in img_src.get_attribute('src') and not img_src.get_attribute('src') in image_urls:
                 image_urls.add(img_src.get_attribute('src'))
-                print(f"Loaded {len(image_urls)}/{max_images}")
+                logging.debug(f"Loaded {len(image_urls)}/{max_images}")
 
             # navigate to next image
             clickable_element = WebDriverWait(wd, 20).until(
@@ -89,7 +113,8 @@ def get_images_from_url(wd: webdriver, url: str, delay: int = 1):
 
             clickable_element.click()
         except Exception as e:
-            print(f"FAILED - {e}")
+            logging.error(f"Something went wrong on retrieving image urls")
+            logging.error(f"Message: {str(e)}")
             continue
 
     return image_urls
@@ -156,8 +181,95 @@ def download_imgs():
                 file_index += 1
 
 
-# Press the green button in the gutter to run the script.
-if __name__ == '__main__':
-    download_imgs()
+def get_last_file_read() -> dict:
+    dict_files = [os.path.basename(f).split('.')[0] for f in os.listdir(HISTORY_PATH) if f.endswith(".pkl")]
+    dict_files = [re.sub(r"dict-(.*)", r"\1", line) for line in dict_files]
+    dict_files = [datetime.datetime.strptime(date_string, DATE_TIME_FORMAT) for date_string in dict_files]
+    dict_files.sort()
+    last_date = dict_files[-1]
+    dict_files = [f for f in os.listdir(HISTORY_PATH) if last_date.strftime(DATE_TIME_FORMAT) in f]
+    if len(dict_files) != 1:
+        raise Exception(f"It should be only 1 file with date_time = {last_date}")
+
+    with open(os.path.join(HISTORY_PATH, dict_files[0]), 'rb') as f:
+        last_dict = pickle.load(f)
+    for key in last_dict:
+        print(f"{key}: {last_dict[key]}")
+    print(last_dict)
+
+
+def scrap_images_from_txt(filename: str = None):
+    """Scans images in URLs prodivded in the .txt file"""
+    assert URL_FILE_NAME
+    logging.debug(f"Reading file {URL_FILE_NAME}...")
+    try:
+        # first: create needed folders
+        if not URLS_PATH:
+            # create urls folder if does not exist to store urls files with images' urls
+            os.makedirs(URLS_PATH)
+        if not HISTORY_PATH:
+            # create 'history' folder if does not exist to store last tries fetching images' urls
+            os.makedirs(HISTORY_PATH)
+
+        # load text file -> lines to list of strings (one item for each url)
+        with open(URL_FILE_NAME, encoding="utf-8") as file:
+            # urls in filename to list
+            lines = file.read().splitlines()
+        # create dictionary for history tracking
+        url_img_count_dict = {}
+        if LOAD_LAST_JOB:
+            url_img_count_dict = get_last_file_read()
+        # initialize driver
+        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
+        for line in lines:
+            code = re.sub(r".*\/(.*)", r"\1", line)
+            logging.debug(f"Step: {code} ({lines.index(line) + 1}/({len(lines)}))")
+            images = ["url1", "url2"]  # get_images_from_url(wd=driver, url=line, )
+            url_img_count_dict[code] = len(images)
+
+            output_file = os.path.join(ROOT_DIR, "urls", f"{code}.txt")
+            with open(output_file, 'w+') as f:
+                f.write('\n'.join(images))
+        driver.quit()
+        # save dictionary for traceability
+        with open(os.path.join(HISTORY_PATH, f"dict-{time.strftime(DATE_TIME_FORMAT)}.pkl"), 'w+') as f:
+            pickle.dump(url_img_count_dict, f)
+
+    except Exception as e:
+        logging.error(f"Failed to read file {URL_FILE_NAME}...")
+        logging.error(f"Message: {str(e)}")
+        return
+
+    logging.debug(f"Successfully read {URL_FILE_NAME}!")
+    logging.debug(f"Txt files saved in the /urls folder for each result (total={len(lines)} files)")
+
+
+def set_file_name():
+    global URL_FILE_NAME
+    URL_FILE_NAME = fd.askopenfilename(
+        title="Select .txt file",
+        filetypes=[("Text files", ".txt")]
+    )
+
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Web image scraper")
+        self.geometry("300x300")
+        self.chk_last_job = tk.Checkbutton(window, text='Continue last job', variable=LOAD_LAST_JOB, onvalue=True, offvalue=False)
+        self.chk_last_job.place(x=50, y=20)
+
+        self.set_file_button = tk.Button(text="Choose text file", command=set_file_name)
+        self.set_file_button.place(x=50, y=60)
+
+        self.start_button = tk.Button(text="START", command=scrap_images_from_txt)
+        self.start_button.place(x=50, y=100)
+
+        # self.mainloop()
+
+
+if __name__ == "__main__":
+    app = App()
+    app.mainloop()
 
 
