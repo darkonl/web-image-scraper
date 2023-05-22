@@ -34,9 +34,6 @@ LOAD_LAST_JOB = False
 URL_FILE_NAME = None
 
 
-window = tk.Tk()
-window.title('Web image scraper')
-
 def flatten(x):
     result = []
     for el in x:
@@ -198,10 +195,10 @@ def get_last_file_read() -> dict:
     print(last_dict)
 
 
-def scrap_images_from_txt(filename: str = None):
+def scrap_images_from_txt(filename: str = None, continue_last_job: bool = False):
     """Scans images in URLs prodivded in the .txt file"""
-    assert URL_FILE_NAME
-    logging.debug(f"Reading file {URL_FILE_NAME}...")
+    assert filename
+    logging.debug(f"Reading file {filename}...")
     try:
         # first: create needed folders
         if not URLS_PATH:
@@ -212,7 +209,7 @@ def scrap_images_from_txt(filename: str = None):
             os.makedirs(HISTORY_PATH)
 
         # load text file -> lines to list of strings (one item for each url)
-        with open(URL_FILE_NAME, encoding="utf-8") as file:
+        with open(filename, encoding="utf-8") as file:
             # urls in filename to list
             lines = file.read().splitlines()
         # create dictionary for history tracking
@@ -236,36 +233,48 @@ def scrap_images_from_txt(filename: str = None):
             pickle.dump(url_img_count_dict, f)
 
     except Exception as e:
-        logging.error(f"Failed to read file {URL_FILE_NAME}...")
+        logging.error(f"Failed to read file {filename}...")
         logging.error(f"Message: {str(e)}")
         return
 
-    logging.debug(f"Successfully read {URL_FILE_NAME}!")
+    logging.debug(f"Successfully read {filename}!")
     logging.debug(f"Txt files saved in the /urls folder for each result (total={len(lines)} files)")
 
 
-def set_file_name():
-    global URL_FILE_NAME
-    URL_FILE_NAME = fd.askopenfilename(
-        title="Select .txt file",
-        filetypes=[("Text files", ".txt")]
-    )
 
 class App(tk.Tk):
-    def __init__(self):
+    file_name = None
+    load_last_file = False
+
+    def set_file_name(self):
+        self.file_name = fd.askopenfilename(
+            title="Select .txt file",
+            filetypes=[("Text files", ".txt")]
+        )
+
+    def set_run_last_job(self):
+        self.load_last_file = not self.load_last_file
+
+    def start_application(self):
+        scrap_images_from_txt(self.file_name, self.load_last_file)
+
+    def __init__(self, file_name: str = None, load_last_file: bool = False):
         super().__init__()
+        self.file_name = file_name
+        self.load_last_file = load_last_file
         self.title("Web image scraper")
         self.geometry("300x300")
-        self.chk_last_job = tk.Checkbutton(window, text='Continue last job', variable=LOAD_LAST_JOB, onvalue=True, offvalue=False)
+        self.chk_last_job = tk.Checkbutton(self, text='Continue last job', onvalue=True, offvalue=False, command=self.set_run_last_job)
         self.chk_last_job.place(x=50, y=20)
+        self.chk_last_job.pack()
 
-        self.set_file_button = tk.Button(text="Choose text file", command=set_file_name)
-        self.set_file_button.place(x=50, y=60)
+        self.set_file_button = tk.Button(self, text="Choose text file", command=self.set_file_name)
+        self.set_file_button.place(x=50, y=80)
+        self.set_file_button.pack()
 
-        self.start_button = tk.Button(text="START", command=scrap_images_from_txt)
-        self.start_button.place(x=50, y=100)
-
-        # self.mainloop()
+        self.start_button = tk.Button(self, text="START", command=self.start_application)
+        self.start_button.place(x=50, y=140)
+        self.start_button.pack()
 
 
 if __name__ == "__main__":
