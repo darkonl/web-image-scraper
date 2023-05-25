@@ -11,18 +11,22 @@ import io
 from PIL import Image
 import time
 import datetime
-import csv
 import re
 import pickle
 import tkinter as tk
 from tkinter import filedialog as fd
 import logging
+import sys
+import threading
+from pathlib import Path
+
+IS_DEBUG = False if sys.gettrace() is None else True
 
 logging.basicConfig(
     filename='app.log',
     filemode='w',
     format='%(name)s - %(levelname)s - %(message)s',
-    level=logging.WARNING)
+    level=logging.DEBUG)
 
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -32,6 +36,7 @@ URLS_PATH = os.path.join(ROOT_DIR, "urls")
 DATE_TIME_FORMAT = '%Y%m%d-%H%M%S'
 LOAD_LAST_JOB = False
 URL_FILE_NAME = None
+IMGS_PATH = os.path.join(ROOT_DIR, "imgs")
 
 
 def flatten(x):
@@ -56,6 +61,8 @@ def get_images_from_url(wd: webdriver, url: str, delay: int = 1) -> set():
 
     image_urls = set()
 
+    max_images = 1
+
     try:
         myElem = WebDriverWait(wd, 6).until(
             EC.presence_of_element_located(
@@ -65,11 +72,11 @@ def get_images_from_url(wd: webdriver, url: str, delay: int = 1) -> set():
         logging.debug("Page is ready!")
     except TimeoutException:
         logging.error(f"Loading {url} took too much time!")
-        return image_urls
+        return image_urls, max_images
     except Exception as e:
         logging.error(f"Something went wrong with {url}")
         logging.error(f"Message: {str(e)}")
-        return image_urls
+        return image_urls, max_images
 
 
     try:
@@ -78,9 +85,7 @@ def get_images_from_url(wd: webdriver, url: str, delay: int = 1) -> set():
     except Exception as e:
         logging.error(f"Something went wrong with {url}")
         logging.error(f"Message: {str(e)}")
-        return image_urls
-
-    max_images = 1
+        return image_urls, max_images
 
     while len(image_urls) < max_images:
         try:
@@ -108,13 +113,16 @@ def get_images_from_url(wd: webdriver, url: str, delay: int = 1) -> set():
                 )
             )
 
+            if IS_DEBUG and len(image_urls) > 5:
+                return image_urls, max_images
+
             clickable_element.click()
         except Exception as e:
             logging.error(f"Something went wrong on retrieving image urls")
             logging.error(f"Message: {str(e)}")
             continue
 
-    return image_urls
+    return image_urls, max_images
 
 
 def download_image(download_path: str, url: str, file_name: str):
@@ -132,21 +140,39 @@ def download_image(download_path: str, url: str, file_name: str):
         print('FAILED - ', e)
 
 
+def ensure_dir_created(path: str = None):
+    assert path
+    if not os.path.exists(path):
+        # create urls folder if does not exist to store urls files with images' urls
+        os.makedirs(path)
+
+
 def download_imgs():
-    files_dir = os.path.join(ROOT_DIR, "urls")
-    files_path = [f for f in os.scandir(files_dir) if f.is_file() and any(char.isdigit() for char in f.name)]
-    output_img_path = os.path.join(ROOT_DIR, "imgs")
+    # first: create needed folders
+    ensure_dir_created(IMGS_PATH)
+
+    files_path = [os.path.join(URLS_PATH, f) for f in os.listdir(URLS_PATH) if f.endswith(".txt")]
     file_index = 0
     for path in files_path:
-        with open(path, 'rb') as f:
-            imgs_dict = pickle.load(f)
-        for key in imgs_dict:
-            img_srcs = imgs_dict[key]
-            for img in img_srcs:
-                img_data = requests.get(img).content
-                with open(os.path.join(output_img_path, f"img_{file_index}.jpeg"), 'wb') as handler:
+        try:
+            logging.debug(f"Downloading images from {path}")
+
+            code = Path(path).stem
+            img_url_list = []
+            with open(path, 'r', encoding='UTF-8') as f:
+                while line := f.readline():
+                    img_url_list.append(line.rstrip())
+            for img_url in img_url_list:
+                img_data = requests.get(img_url).content
+                img_name = Path(img_url).stem
+                ensure_dir_created(os.path.join(IMGS_PATH, code))
+                with open(os.path.join(IMGS_PATH, code, f"{img_name.replace(',', '_')}.jpg"), 'wb') as handler:
                     handler.write(img_data)
                 file_index += 1
+            logging.debug(f"Successfully saved {len(img_url_list)} in {os.path.join(IMGS_PATH, code)}")
+        except Exception as e:
+            logging.error(f"Failed to read {path}")
+            logging.error(f"Message: {str(e)}")
 
 
 def get_last_file_read() -> dict:
@@ -177,11 +203,13 @@ def run_url(line: str, url_img_count_dict: dict) -> bool:
                 return True
             if len(text_file_read) > 1:
                 raise Exception(f"There should be at least one file containing {key}")
-            with open(text_file_read[0], 'r') as fp:
+            file_path = os.path.join(URLS_PATH, text_file_read[0])
+            with open(file_path, 'r') as fp:
                 for count, line in enumerate(fp):
                     pass
             if count + 1 is url_img_count_dict[key]:
                 return False
+            return True
     return True
 
 
@@ -189,6 +217,7 @@ def scrap_images_from_txt(filename: str = None, continue_last_job: bool = False)
     """Scans images in URLs prodivded in the .txt file"""
     assert filename
     logging.debug(f"Reading file {filename}...")
+    count = 0
     try:
         # first: create needed folders
         if not os.path.exists(URLS_PATH):
@@ -208,23 +237,30 @@ def scrap_images_from_txt(filename: str = None, continue_last_job: bool = False)
         if continue_last_job:
             url_img_count_dict = get_last_file_read()
 
-        # initialize driver
-        options = webdriver.ChromeOptions()
-        options.add_argument("--headless")
-        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
         for line in lines:
             if continue_last_job and not run_url(line, url_img_count_dict):
                 continue
 
             code = re.sub(r".*\/(.*)", r"\1", line)
+            logging.info(f"Reading {code}...")
+
+            # create new driver
+            driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
+
             logging.debug(f"Step: {code} ({lines.index(line) + 1}/({len(lines)}))")
-            images = get_images_from_url(wd=driver, url=line, )
-            url_img_count_dict[code] = len(images)
+            images, image_count = get_images_from_url(wd=driver, url=line, )
+            logging.info(f"Successfully read {code}, fetched a total of {image_count} images (url: {line})")
+            url_img_count_dict[code] = image_count
 
             output_file = os.path.join(ROOT_DIR, "urls", f"{code}.txt")
             with open(output_file, 'w+') as f:
                 f.write('\n'.join(images))
-        driver.quit()
+
+            # dispose driver
+            driver.quit()
+            count += 1
+            if IS_DEBUG and count == 10:
+                break
         # save dictionary for traceability
         if len(url_img_count_dict) != 0:
             with open(os.path.join(HISTORY_PATH, f"dict-{time.strftime(DATE_TIME_FORMAT)}.pkl"), 'wb+') as f:
@@ -233,6 +269,10 @@ def scrap_images_from_txt(filename: str = None, continue_last_job: bool = False)
     except Exception as e:
         logging.error(f"Failed to read file {filename}...")
         logging.error(f"Message: {str(e)}")
+
+        if len(url_img_count_dict) != 0:
+            with open(os.path.join(HISTORY_PATH, f"dict-{time.strftime(DATE_TIME_FORMAT)}.pkl"), 'wb+') as f:
+                pickle.dump(url_img_count_dict, f)
         return
 
     logging.debug(f"Successfully read {filename}!")
@@ -242,6 +282,10 @@ def scrap_images_from_txt(filename: str = None, continue_last_job: bool = False)
 class App(tk.Tk):
     file_name = None
     load_last_file = False
+
+    def refresh(self):
+        self.update()
+        self.after(1000, self.refresh)
 
     def set_file_name(self):
         self.file_name = fd.askopenfilename(
@@ -254,6 +298,10 @@ class App(tk.Tk):
 
     def start_application(self):
         scrap_images_from_txt(self.file_name, self.load_last_file)
+
+    def start_download(self):
+        self.refresh()
+        threading.Thread(target=download_imgs).start()
 
     def __init__(self, file_name: str = None, load_last_file: bool = False):
         super().__init__()
@@ -275,6 +323,10 @@ class App(tk.Tk):
 
         self.start_button = tk.Button(self, text="START", command=self.start_application)
         self.start_button.place(x=50, y=140)
+        self.start_button.pack()
+
+        self.start_button = tk.Button(self, text="DOWNLOAD", command=self.start_download)
+        self.start_button.place(x=50, y=200)
         self.start_button.pack()
 
 
